@@ -1,0 +1,4 @@
+(sym_lib_table
+  (version 7)
+  (lib (name "Components")(type "Legacy")(uri "${KIPRJMOD}/Components/TTGO-T1-DEVKITC.lib")(options "")(descr ""))
+)
