@@ -6,7 +6,7 @@
 #include "openlcb/ConfigRepresentation.hxx"
 #include "openlcb/MemoryConfig.hxx"
 
-#include "TurnoutConfig.h"
+#include "RGBWConfig.h"
 
 namespace openlcb
 {
@@ -27,19 +27,14 @@ namespace openlcb
 extern const SimpleNodeStaticValues SNIP_STATIC_DATA = {
     4,
     "OpenMRN",
-    "LCC Turnout Controller",
+    "LCC RGBW Lighting Controller",
     ARDUINO_VARIANT,
-    "1.0.1"};
+    "1.0.0"};
 
-constexpr uint8_t NUM_TURNOUTS = 8;
-//constexpr uint8_t NUM_POINTSS = 8;
+constexpr uint8_t NUM_RGBW_STRIPS = 1;
 
-/// Declares a repeated group of a given base group and number of repeats. The
-/// ProducerConfig and ConsumerConfig groups represent the configuration layout
-/// needed by the ConfiguredProducer and ConfiguredConsumer classes, and come
-/// from their respective hxx file.
-using TurnoutGroup = RepeatedGroup<TurnoutConfig, NUM_TURNOUTS>;
-//using PointsGroup = RepeatedGroup<PointsConfig, NUM_POINTSS>;
+/// Declares a repeated group of RGBW strip configurations
+using RGBWGroup = RepeatedGroup<RGBWConfig, NUM_RGBW_STRIPS>;
 
 /// Modify this value every time the EEPROM needs to be cleared on the node
 /// after an update.
@@ -50,8 +45,7 @@ static constexpr uint16_t CANONICAL_VERSION = 0x100;
 CDI_GROUP(IoBoardSegment, Segment(MemoryConfigDefs::SPACE_CONFIG), Offset(128));
 /// Each entry declares the name of the current entry, then the type and then
 /// optional arguments list.
-CDI_GROUP_ENTRY(turnouts, TurnoutGroup, Name("Turnouts"), RepName("Turnout"));
-//CDI_GROUP_ENTRY(points, PointsGroup, Name("Points"), RepName("Points"));
+CDI_GROUP_ENTRY(rgbw_strips, RGBWGroup, Name("RGBW Light Strips"), RepName("Strip"));
 CDI_GROUP_ENTRY(internal_config, InternalConfigData);
 CDI_GROUP_END();
 
