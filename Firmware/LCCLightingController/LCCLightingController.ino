@@ -14,6 +14,15 @@ static constexpr openlcb::ConfigDef cfg(0);
 static constexpr uint8_t NUM_RGBW_STRIPS = openlcb::NUM_RGBW_STRIPS;
 
 namespace openlcb {
+// Define SNIP_STATIC_DATA (declared in config.h)
+const SimpleNodeStaticValues SNIP_STATIC_DATA = {
+    4,
+    "OpenMRN",
+    "LCC RGBW Lighting Controller",
+    ARDUINO_VARIANT,
+    "1.0.0"
+};
+
 const char CDI_FILENAME[] = "/spiffs/cdi.xml";
 extern const char CDI_DATA[] = "";
 extern const char *const CONFIG_FILENAME = "/spiffs/openlcb_config";
@@ -44,10 +53,28 @@ void setup() {
   }
 
   openmrn.create_config_descriptor_xml(cfg, openlcb::CDI_FILENAME);
+  
+  // Check if we need to create/initialize config file
+  bool configExists = SPIFFS.exists(openlcb::CONFIG_FILENAME);
+  
   openmrn.stack()->create_config_file_if_needed(
     cfg.seg().internal_config(),
     openlcb::CANONICAL_VERSION,
     openlcb::CONFIG_FILE_SIZE);
+  
+  // If config was just created, write default event IDs
+  if (!configExists) {
+    Serial.println("New config file created, initializing event IDs...");
+    int fd = ::open(openlcb::CONFIG_FILENAME, O_RDWR);
+    if (fd >= 0) {
+      cfg.seg().rgbw_strips().entry(0).red_event().write(fd, openlcb::RGBW_EVENT_INIT[0]);
+      cfg.seg().rgbw_strips().entry(0).green_event().write(fd, openlcb::RGBW_EVENT_INIT[1]);
+      cfg.seg().rgbw_strips().entry(0).blue_event().write(fd, openlcb::RGBW_EVENT_INIT[2]);
+      cfg.seg().rgbw_strips().entry(0).white_event().write(fd, openlcb::RGBW_EVENT_INIT[3]);
+      cfg.seg().rgbw_strips().entry(0).brightness_event().write(fd, openlcb::RGBW_EVENT_INIT[4]);
+      ::close(fd);
+    }
+  }
 
   // Initialize ADS1115 (controller only, but harmless if not populated)
   if (!adc.init()) {
@@ -65,8 +92,7 @@ void setup() {
     rgbwStrips[i] = new openlcb::RGBWStrip(
       openmrn.stack()->node(),
       cfg.seg().rgbw_strips().entry(i),
-      &adc,
-      openmrn.stack()->dg_service()
+      &adc
     );
   }
 

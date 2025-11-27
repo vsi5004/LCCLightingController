@@ -24,17 +24,21 @@ namespace openlcb
 /// - the generated cdi.xml will include this data
 /// - the Simple Node Ident Info Protocol will return this data
 /// - the ACDI memory space will contain this data.
-extern const SimpleNodeStaticValues SNIP_STATIC_DATA = {
-    4,
-    "OpenMRN",
-    "LCC RGBW Lighting Controller",
-    ARDUINO_VARIANT,
-    "1.0.0"};
+extern const SimpleNodeStaticValues SNIP_STATIC_DATA;
 
 constexpr uint8_t NUM_RGBW_STRIPS = 1;
 
 /// Declares a repeated group of RGBW strip configurations
 using RGBWGroup = RepeatedGroup<RGBWConfig, NUM_RGBW_STRIPS>;
+
+/// Initial values for RGBW configuration
+constexpr uint64_t RGBW_EVENT_INIT[] = {
+    0x0501010122600000ULL,  // Red base
+    0x0501010122600100ULL,  // Green base
+    0x0501010122600200ULL,  // Blue base
+    0x0501010122600300ULL,  // White base
+    0x0501010122600400ULL   // Brightness base
+};
 
 /// Modify this value every time the EEPROM needs to be cleared on the node
 /// after an update.

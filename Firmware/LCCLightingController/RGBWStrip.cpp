@@ -1,30 +1,28 @@
 #include "RGBWStrip.h"
+#include "config.h"
 
 namespace openlcb {
-
-// Datagram protocol ID for RGBW updates
-static constexpr uint8_t RGBW_DATAGRAM_ID = 0x80;
 
 // ============================================================================
 // RGBWStrip Implementation
 // ============================================================================
 
-RGBWStrip::RGBWStrip(Node *node, const RGBWConfig &cfg, ADS1115_WE *adc,
-                     DatagramService *dg_service)
-    : node_(node), cfg_(cfg), adc_(adc), dgService_(dg_service),
-      strip_(nullptr), isController_(false), controllerNodeId_(0),
+RGBWStrip::RGBWStrip(Node *node, const RGBWConfig &cfg, ADS1115_WE *adc)
+    : node_(node), cfg_(cfg), adc_(adc),
+      strip_(nullptr), isController_(false),
       currentR_(0), currentG_(0), currentB_(0), currentW_(0), currentBrightness_(255),
       lastSentR_(0), lastSentG_(0), lastSentB_(0), lastSentW_(0), lastSentBrightness_(255),
-      adcChannelIndex_(0), datagramHandler_(nullptr), sendFlow_(nullptr) {}
+      adcChannelIndex_(0) {
+    for (int i = 0; i < 5; i++) {
+        eventIds_[i] = 0;
+        eventHandlers_[i] = nullptr;
+    }
+}
 
 RGBWStrip::~RGBWStrip() {
     if (strip_) delete strip_;
-    if (datagramHandler_) {
-        // Note: OpenMRN doesn't provide unregister, handler will be cleaned up on destruction
-        delete datagramHandler_;
-    }
-    if (sendFlow_) {
-        delete sendFlow_;
+    for (int i = 0; i < 5; i++) {
+        if (eventHandlers_[i]) delete eventHandlers_[i];
     }
 }
 
@@ -55,7 +53,15 @@ ConfigUpdateListener::UpdateAction RGBWStrip::apply_configuration(int fd, bool i
         isController_ = (configuredController == 1);
     }
     
-    controllerNodeId_ = cfg_.controller_node_id().read(fd);
+    // Read event IDs for each channel
+    eventIds_[0] = cfg_.red_event().read(fd);
+    eventIds_[1] = cfg_.green_event().read(fd);
+    eventIds_[2] = cfg_.blue_event().read(fd);
+    eventIds_[3] = cfg_.white_event().read(fd);
+    eventIds_[4] = cfg_.brightness_event().read(fd);
+    
+    Serial.printf("Event IDs - R:0x%012llX G:0x%012llX B:0x%012llX W:0x%012llX Br:0x%012llX\n",
+                 eventIds_[0], eventIds_[1], eventIds_[2], eventIds_[3], eventIds_[4]);
 
     // Reinitialize NeoPixel strip if parameters changed
     if (!strip_ || strip_->numPixels() != ledCount) {
@@ -68,24 +74,22 @@ ConfigUpdateListener::UpdateAction RGBWStrip::apply_configuration(int fd, bool i
         Serial.printf("NeoPixel initialized: %d LEDs on pin %d\n", ledCount, NEOPIXEL_PIN);
     }
 
-    // Register datagram handler (for receiving datagrams)
-    // Note: Handler registers itself in its constructor
-    if (!datagramHandler_) {
-        datagramHandler_ = new RGBWDatagramHandler(this, dgService_);
-        Serial.println("Datagram handler registered");
-    }
-    
-    // Create send flow for controller (for sending datagrams)
-    if (isController_ && !sendFlow_) {
-        sendFlow_ = new RGBWSendFlow(this);
-        Serial.println("Datagram send flow created");
+    // Register event handlers only for followers (controller only sends, doesn't receive)
+    if (!isController_) {
+        for (int i = 0; i < 5; i++) {
+            if (!eventHandlers_[i]) {
+                eventHandlers_[i] = new RGBWEventHandler(this, i);
+            }
+        }
+        Serial.println("Event handlers registered for all channels");
+    } else {
+        Serial.println("Controller mode - event handlers not registered (send only)");
     }
 
     if (isController_) {
         Serial.println("Running as CONTROLLER (HMI device)");
     } else {
-        Serial.printf("Running as FOLLOWER (listening to Node ID: 0x%012llX)\n", 
-                     controllerNodeId_);
+        Serial.println("Running as FOLLOWER");
     }
 
     return UPDATED;
@@ -95,11 +99,15 @@ void RGBWStrip::factory_reset(int fd) {
     cfg_.description().write(fd, "");
     CDI_FACTORY_RESET(cfg_.led_count);
     CDI_FACTORY_RESET(cfg_.is_controller);
-    CDI_FACTORY_RESET(cfg_.controller_node_id);
+    cfg_.red_event().write(fd, RGBW_EVENT_INIT[0]);
+    cfg_.green_event().write(fd, RGBW_EVENT_INIT[1]);
+    cfg_.blue_event().write(fd, RGBW_EVENT_INIT[2]);
+    cfg_.white_event().write(fd, RGBW_EVENT_INIT[3]);
+    cfg_.brightness_event().write(fd, RGBW_EVENT_INIT[4]);
 }
 
 void RGBWStrip::poll_adc_inputs() {
-    if (!isController_ || !adc_ || !sendFlow_) return;
+    if (!isController_ || !adc_) return;
 
     static const ADS1115_MUX channels[4] = {
         ADS1115_COMP_0_GND, ADS1115_COMP_1_GND,
@@ -144,52 +152,63 @@ void RGBWStrip::poll_adc_inputs() {
         
         update_strip(currentR_, currentG_, currentB_, currentW_);
         
-        // Log and send on any change
+        // Send events for any changed channels
         if (changed) {
+            if (currentR_ != lastSentR_) {
+                send_channel_event(0, currentR_);
+                lastSentR_ = currentR_;
+            }
+            if (currentG_ != lastSentG_) {
+                send_channel_event(1, currentG_);
+                lastSentG_ = currentG_;
+            }
+            if (currentB_ != lastSentB_) {
+                send_channel_event(2, currentB_);
+                lastSentB_ = currentB_;
+            }
+            if (currentW_ != lastSentW_) {
+                send_channel_event(3, currentW_);
+                lastSentW_ = currentW_;
+            }
             Serial.printf("RGBW Update: R=%d G=%d B=%d W=%d Brightness=%d\n",
                          currentR_, currentG_, currentB_, currentW_, currentBrightness_);
-            sendFlow_->send_datagram(currentR_, currentG_, currentB_, currentW_, currentBrightness_);
-            lastSentR_ = currentR_;
-            lastSentG_ = currentG_;
-            lastSentB_ = currentB_;
-            lastSentW_ = currentW_;
-            lastSentBrightness_ = currentBrightness_;
         }
     }
 }
 
-void RGBWStrip::handle_datagram(NodeHandle src, const DatagramPayload &payload) {
-    // Check if we should accept (filter by source node ID)
-    if (controllerNodeId_ != 0 && src.id != controllerNodeId_) {
-        return; // Ignore datagrams from other controllers
+void RGBWStrip::send_channel_event(int channel, uint8_t value) {
+    // Encode value into lower byte of event ID
+    uint64_t base_event = eventIds_[channel] & 0xFFFFFFFFFFFFFF00ULL;
+    uint64_t encoded_event = base_event | value;
+    
+    // Send as global event report
+    auto *msg = node_->iface()->global_message_write_flow()->alloc();
+    msg->data()->reset(Defs::MTI_EVENT_REPORT, node_->node_id(), 
+                      eventid_to_buffer(encoded_event));
+    node_->iface()->global_message_write_flow()->send(msg);
+    
+    const char* names[] = {"Red", "Green", "Blue", "White", "Brightness"};
+    Serial.printf("Sent %s event: 0x%012llX (value=%d)\n", names[channel], encoded_event, value);
+}
+
+void RGBWStrip::handle_channel_event(int channel, uint8_t value) {
+    const char* names[] = {"Red", "Green", "Blue", "White", "Brightness"};
+    
+    switch (channel) {
+        case 0: currentR_ = value; break;
+        case 1: currentG_ = value; break;
+        case 2: currentB_ = value; break;
+        case 3: currentW_ = value; break;
+        case 4: 
+            currentBrightness_ = value;
+            if (strip_) {
+                strip_->setBrightness(value);
+            }
+            break;
     }
     
-    // Verify protocol and size (now includes brightness byte)
-    if (payload.size() != 6 || (uint8_t)payload[0] != RGBW_DATAGRAM_ID) {
-        return; // Invalid datagram
-    }
-    
-    // Extract RGBW values and brightness
-    uint8_t r = (uint8_t)payload[1];
-    uint8_t g = (uint8_t)payload[2];
-    uint8_t b = (uint8_t)payload[3];
-    uint8_t w = (uint8_t)payload[4];
-    uint8_t brightness = (uint8_t)payload[5];
-    
-    currentR_ = r;
-    currentG_ = g;
-    currentB_ = b;
-    currentW_ = w;
-    currentBrightness_ = brightness;
-    
-    // Apply brightness to strip
-    if (strip_) {
-        strip_->setBrightness(brightness);
-    }
-    update_strip(r, g, b, w);
-    
-    Serial.printf("Received RGBW: R=%d G=%d B=%d W=%d Brightness=%d from 0x%012llX\n", 
-                 r, g, b, w, brightness, src.id);
+    update_strip(currentR_, currentG_, currentB_, currentW_);
+    Serial.printf("Received %s event: value=%d\n", names[channel], value);
 }
 
 void RGBWStrip::update_strip(uint8_t r, uint8_t g, uint8_t b, uint8_t w) {
@@ -199,82 +218,64 @@ void RGBWStrip::update_strip(uint8_t r, uint8_t g, uint8_t b, uint8_t w) {
 }
 
 // ============================================================================
-// RGBWDatagramHandler Implementation (Receiving)
+// RGBWEventHandler Implementation
 // ============================================================================
 
-RGBWDatagramHandler::RGBWDatagramHandler(RGBWStrip *parent, 
-                                         DatagramService *dg_service)
-    : DefaultDatagramHandler(dg_service), parent_(parent) {}
-
-StateFlowBase::Action RGBWDatagramHandler::entry() {
-    // Get the incoming datagram
-    auto *dg = message()->data();
-    
-    // Pass to parent for handling
-    parent_->handle_datagram(dg->src, dg->payload);
-    
-    // Send positive acknowledgement (no reply pending)
-    return respond_ok(0);
+RGBWEventHandler::RGBWEventHandler(RGBWStrip *parent, int channel)
+    : parent_(parent), channel_(channel) {
+    // Register this handler for a range of 256 events (base + 0-255)
+    // The mask is applied to the lower 32 bits only in OpenMRN
+    // We use 0xFFFFFF00 to mask the lower byte, allowing values 0-255
+    EventRegistry::instance()->register_handler(
+        EventRegistryEntry(this, parent_->event_id(channel), 0xFFFFFF00), 0);
 }
 
-// ============================================================================
-// RGBWSendFlow Implementation (Sending)
-// ============================================================================
-
-RGBWSendFlow::RGBWSendFlow(RGBWStrip *parent)
-    : StateFlowBase(parent->dg_service()), 
-      parent_(parent), 
-      dgClient_(nullptr),
-      pendingR_(0), pendingG_(0), pendingB_(0), pendingW_(0), pendingBrightness_(255) {}
-
-void RGBWSendFlow::send_datagram(uint8_t r, uint8_t g, uint8_t b, uint8_t w, uint8_t brightness) {
-    // Store values to send
-    pendingR_ = r;
-    pendingG_ = g;
-    pendingB_ = b;
-    pendingW_ = w;
-    pendingBrightness_ = brightness;
-    
-    // Trigger the flow
-    start_flow(STATE(entry));
+uint64_t RGBWEventHandler::base_event_id() const {
+    return parent_->event_id(channel_) & 0xFFFFFFFFFFFFFF00ULL;
 }
 
-StateFlowBase::Action RGBWSendFlow::entry() {
-    return allocate_and_call(STATE(send_datagram_message),
-                             parent_->dg_service()->client_allocator());
-}
-
-StateFlowBase::Action RGBWSendFlow::send_datagram_message() {
-    dgClient_ = full_allocation_result(parent_->dg_service()->client_allocator());
+void RGBWEventHandler::handle_event_report(const EventRegistryEntry &entry,
+                                           EventReport *event,
+                                           BarrierNotifiable *done) {
+    AutoNotify an(done);
     
-    // NOTE: LCC datagrams are point-to-point only and cannot be broadcast.
-    // For now, controller only updates its own strip locally.
-    // TODO: Implement proper follower support either by:
-    //   1. Sending individual datagrams to each configured follower node ID
-    //   2. Using LCC Producer-Consumer events with RGBW data in event payload
+    // Check if this event matches our base (top 56 bits)
+    uint64_t received_base = event->event & 0xFFFFFFFFFFFFFF00ULL;
     
-    Serial.printf("Local update only (broadcast not supported): R=%d G=%d B=%d W=%d Brightness=%d\n", 
-                 pendingR_, pendingG_, pendingB_, pendingW_, pendingBrightness_);
-    
-    // Return client and exit immediately
-    parent_->dg_service()->client_allocator()->typed_insert(dgClient_);
-    dgClient_ = nullptr;
-    
-    return exit();
-}
-
-StateFlowBase::Action RGBWSendFlow::datagram_sent() {
-    // Check result (optional - could log errors)
-    uint32_t result = dgClient_->result();
-    if (!(result & DatagramClient::OPERATION_SUCCESS)) {
-        Serial.printf("Datagram send failed: 0x%04X\n", result);
+    if (received_base == base_event_id()) {
+        // Extract value from lower byte
+        uint8_t value = event->event & 0xFF;
+        parent_->handle_channel_event(channel_, value);
     }
-    
-    // Return client to pool
-    parent_->dg_service()->client_allocator()->typed_insert(dgClient_);
-    dgClient_ = nullptr;
-    
-    return exit();
+}
+
+void RGBWEventHandler::handle_identify_global(const EventRegistryEntry &entry,
+                                               EventReport *event,
+                                               BarrierNotifiable *done) {
+    if (parent_->node()->is_initialized()) {
+        event->event_write_helper<1>()->WriteAsync(
+            parent_->node(), 
+            Defs::MTI_CONSUMER_IDENTIFIED_VALID,
+            WriteHelper::global(),
+            eventid_to_buffer(parent_->event_id(channel_)),
+            done->new_child());
+    }
+    done->maybe_done();
+}
+
+void RGBWEventHandler::handle_identify_consumer(const EventRegistryEntry &entry,
+                                                 EventReport *event,
+                                                 BarrierNotifiable *done) {
+    uint64_t received_base = event->event & 0xFFFFFFFFFFFFFF00ULL;
+    if (received_base == base_event_id()) {
+        event->event_write_helper<1>()->WriteAsync(
+            parent_->node(),
+            Defs::MTI_CONSUMER_IDENTIFIED_VALID,
+            WriteHelper::global(),
+            eventid_to_buffer(parent_->event_id(channel_)),
+            done->new_child());
+    }
+    done->maybe_done();
 }
 
 } // namespace openlcb

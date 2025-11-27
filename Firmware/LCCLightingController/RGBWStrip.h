@@ -3,8 +3,9 @@
 
 #include <Adafruit_NeoPixel.h>
 #include <ADS1115_WE.h>
-#include "openlcb/DatagramHandlerDefault.hxx"
-#include "openlcb/Datagram.hxx"
+#include "openlcb/EventHandlerTemplates.hxx"
+#include "openlcb/EventHandler.hxx"
+#include "openlcb/Convert.hxx"
 #include "utils/ConfigUpdateListener.hxx"
 #include "RGBWConfig.h"
 
@@ -16,42 +17,32 @@ namespace openlcb {
 /// Forward declaration
 class RGBWStrip;
 
-/// Datagram handler for receiving RGBW updates from controller devices
-class RGBWDatagramHandler : public DefaultDatagramHandler {
+/// Event consumer for receiving RGBW channel updates from controller devices
+class RGBWEventHandler : public SimpleEventHandler {
 public:
-    RGBWDatagramHandler(RGBWStrip *parent, DatagramService *dg_service);
+    RGBWEventHandler(RGBWStrip *parent, int channel);
     
-    /// Entry point when a datagram arrives
-    Action entry() override;
+    /// Handle incoming channel value event
+    void handle_event_report(const EventRegistryEntry &entry, EventReport *event,
+                             BarrierNotifiable *done) override;
+    
+    void handle_identify_global(const EventRegistryEntry &entry, EventReport *event,
+                                BarrierNotifiable *done) override;
+    
+    void handle_identify_consumer(const EventRegistryEntry &entry, EventReport *event,
+                                   BarrierNotifiable *done) override;
+    
+    uint64_t base_event_id() const;
     
 private:
     RGBWStrip *parent_;
-};
-
-/// Flow for sending datagrams (used by controller)
-class RGBWSendFlow : public StateFlowBase {
-public:
-    RGBWSendFlow(RGBWStrip *parent);
-    
-    /// Trigger sending a datagram with RGBW values and brightness
-    void send_datagram(uint8_t r, uint8_t g, uint8_t b, uint8_t w, uint8_t brightness);
-    
-private:
-    Action entry();
-    Action send_datagram_message();
-    Action datagram_sent();
-    
-    RGBWStrip *parent_;
-    DatagramClient *dgClient_;
-    uint8_t pendingR_, pendingG_, pendingB_, pendingW_, pendingBrightness_;
-    BarrierNotifiable bn_;
+    int channel_;  // 0=Red, 1=Green, 2=Blue, 3=White, 4=Brightness
 };
 
 /// Main RGBW strip controller
 class RGBWStrip : public DefaultConfigUpdateListener {
 public:
-    RGBWStrip(Node *node, const RGBWConfig &cfg, ADS1115_WE *adc, 
-              DatagramService *dg_service);
+    RGBWStrip(Node *node, const RGBWConfig &cfg, ADS1115_WE *adc);
     ~RGBWStrip();
 
     UpdateAction apply_configuration(int fd, bool initial_load, 
@@ -59,20 +50,20 @@ public:
     
     void factory_reset(int fd) OVERRIDE;
 
-    /// Controller: Poll ADC channels and send datagram if changed
+    /// Controller: Poll ADC channels and send events if changed
     void poll_adc_inputs();
 
-    /// Follower: Receive RGBW values and brightness from datagram
-    void handle_datagram(NodeHandle src, const DatagramPayload &payload);
+    /// Follower: Handle incoming channel value event
+    void handle_channel_event(int channel, uint8_t value);
+
+    /// Controller: Send individual channel event
+    void send_channel_event(int channel, uint8_t value);
 
     /// Get node pointer
     Node* node() { return node_; }
     
-    /// Get datagram service
-    DatagramService* dg_service() { return dgService_; }
-
-    /// Get controller node ID filter (0 = accept any)
-    uint64_t controller_node_id() { return controllerNodeId_; }
+    /// Get event ID for specific channel (0=R, 1=G, 2=B, 3=W, 4=Brightness)
+    uint64_t event_id(int channel) { return eventIds_[channel]; }
 
 private:
     void update_strip(uint8_t r, uint8_t g, uint8_t b, uint8_t w);
@@ -80,11 +71,10 @@ private:
     Node *node_;
     const RGBWConfig cfg_;
     ADS1115_WE *adc_;
-    DatagramService *dgService_;
     Adafruit_NeoPixel *strip_;
     
     bool isController_;
-    uint64_t controllerNodeId_;
+    uint64_t eventIds_[5];  // Event IDs: [R, G, B, W, Brightness]
     
     uint8_t currentR_, currentG_, currentB_, currentW_;
     uint8_t currentBrightness_;
@@ -92,11 +82,9 @@ private:
     
     uint8_t adcChannelIndex_;
     
-    RGBWDatagramHandler *datagramHandler_;
-    RGBWSendFlow *sendFlow_;
+    RGBWEventHandler *eventHandlers_[5];  // One handler per channel
     
-    friend class RGBWDatagramHandler;
-    friend class RGBWSendFlow;
+    friend class RGBWEventHandler;
 };
 
 } // namespace openlcb
