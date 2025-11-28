@@ -34,11 +34,14 @@ ADS1115_WE adc = ADS1115_WE();
 Esp32HardwareTwai twai(D8, D9);
 OpenMRN openmrn(NODE_ID);
 
-openlcb::RGBWStrip *rgbwStrips[NUM_RGBW_STRIPS];
+openlcb::RGBWStrip *rgbwStrip = nullptr;
+bool isController = false;
 
 void setup() {
   Serial.begin(115200);
   Wire.begin();
+
+  sleep(2);
 
   Serial.println("\n\n=== LCC RGBW Lighting Controller ===");
   Serial.printf("Node ID: 0x%012llX\n", NODE_ID);
@@ -54,32 +57,32 @@ void setup() {
 
   openmrn.create_config_descriptor_xml(cfg, openlcb::CDI_FILENAME);
   
-  // Check if we need to create/initialize config file
-  bool configExists = SPIFFS.exists(openlcb::CONFIG_FILENAME);
+  // Create config file if needed and check if factory reset is required
+  Serial.printf("Checking config file (expecting version 0x%04X)...\n", openlcb::CANONICAL_VERSION);
   
-  openmrn.stack()->create_config_file_if_needed(
+  // Read current version before calling create_config_file_if_needed
+  int fd_check = ::open(openlcb::CONFIG_FILENAME, O_RDONLY);
+  uint16_t current_version = 0;
+  if (fd_check >= 0) {
+    current_version = cfg.seg().internal_config().version().read(fd_check);
+    ::close(fd_check);
+    Serial.printf("Current stored version: 0x%04X\n", current_version);
+  } else {
+    Serial.println("Config file does not exist yet");
+  }
+  
+  int config_fd = openmrn.stack()->create_config_file_if_needed(
     cfg.seg().internal_config(),
     openlcb::CANONICAL_VERSION,
     openlcb::CONFIG_FILE_SIZE);
-  
-  // If config was just created, write default event IDs
-  if (!configExists) {
-    Serial.println("New config file created, initializing event IDs...");
-    int fd = ::open(openlcb::CONFIG_FILENAME, O_RDWR);
-    if (fd >= 0) {
-      cfg.seg().rgbw_strips().entry(0).red_event().write(fd, openlcb::RGBW_EVENT_INIT[0]);
-      cfg.seg().rgbw_strips().entry(0).green_event().write(fd, openlcb::RGBW_EVENT_INIT[1]);
-      cfg.seg().rgbw_strips().entry(0).blue_event().write(fd, openlcb::RGBW_EVENT_INIT[2]);
-      cfg.seg().rgbw_strips().entry(0).white_event().write(fd, openlcb::RGBW_EVENT_INIT[3]);
-      cfg.seg().rgbw_strips().entry(0).brightness_event().write(fd, openlcb::RGBW_EVENT_INIT[4]);
-      ::close(fd);
-    }
-  }
+  Serial.printf("Config check complete, fd=%d\n", config_fd);
 
   // Initialize ADS1115 (controller only, but harmless if not populated)
   if (!adc.init()) {
+    isController = false;
     Serial.println("ADS1115 not detected - will run as FOLLOWER");
   } else {
+    isController = true;
     adc.setVoltageRange_mV(ADS1115_RANGE_4096);
     adc.setCompareChannels(ADS1115_COMP_0_GND);
     adc.setConvRate(ADS1115_250_SPS);
@@ -87,14 +90,19 @@ void setup() {
     Serial.println("ADS1115 detected - can run as CONTROLLER");
   }
 
-  // Create RGBW strip controllers
-  for (uint8_t i = 0; i < NUM_RGBW_STRIPS; i++) {
-    rgbwStrips[i] = new openlcb::RGBWStrip(
-      openmrn.stack()->node(),
-      cfg.seg().rgbw_strips().entry(i),
-      &adc
-    );
-  }
+  // Create RGBW strip controller and initialize if needed
+  rgbwStrip = new openlcb::RGBWStrip(
+    openmrn.stack()->node(),
+    cfg.seg().rgbw_strips().entry(0),
+    &adc
+  );
+  
+  // The config file is already open from create_config_file_if_needed
+  // Just call factory_reset using the same fd - it was already reset if needed
+  // but only for event configs, not our custom config
+  Serial.println("Initializing RGBW config defaults...");
+  rgbwStrip->factory_reset(config_fd);
+  Serial.println("RGBW config initialized");
 
   // Initialize OpenMRN stack
   openmrn.begin();
@@ -108,18 +116,24 @@ void setup() {
   digitalWrite(LED_BUILTIN, LOW);
 
   Serial.println("=== Initialization Complete ===\n");
+  
+  // Run startup animation if this is a controller
+  if (isController) {
+    Serial.println("Starting fade-in animation...");
+    rgbwStrip->run_startup_animation();
+  }
 }
 
 void loop() {
   openmrn.loop();
 
-  // Controller: Poll ADC inputs every 10ms (matches hmiExample.ino timing)
-  static unsigned long lastPoll = 0;
-  if (millis() - lastPoll >= 10) {
-    for (uint8_t i = 0; i < NUM_RGBW_STRIPS; i++) {
-      rgbwStrips[i]->poll_adc_inputs();
+  // Controller: Poll ADC inputs every 10ms (only if this device is a controller)
+  if (isController) {
+    static unsigned long lastPoll = 0;
+    if (millis() - lastPoll >= 10) {
+      rgbwStrip->poll_adc_inputs();
+      lastPoll = millis();
     }
-    lastPoll = millis();
   }
 
   // Heartbeat LED

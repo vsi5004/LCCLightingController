@@ -8,11 +8,6 @@ CDI_GROUP_ENTRY(description, openlcb::StringConfigEntry<16>,
     Name("Description"),
     Description("User name of this RGBW light strip."));
 
-CDI_GROUP_ENTRY(is_controller, openlcb::Uint8ConfigEntry, 
-    Default(255), Min(0), Max(1),
-    Name("Controller Device"),
-    Description("Set to 1 for controller (HMI inputs), 0 for follower. Leave at 255 for auto-detect based on ADS1115 presence."));
-
 CDI_GROUP_ENTRY(red_event, openlcb::EventConfigEntry,
     Name("Red Channel Event"),
     Description("Event ID base for red channel (0-255). Controller produces, followers consume. Must end in 00."));

@@ -41,8 +41,8 @@ constexpr uint64_t RGBW_EVENT_INIT[] = {
 };
 
 /// Modify this value every time the EEPROM needs to be cleared on the node
-/// after an update.
-static constexpr uint16_t CANONICAL_VERSION = 0x100;
+/// after an update. Increment when config structure changes (fields added/removed).
+static constexpr uint16_t CANONICAL_VERSION = 0x104;
 
 /// Defines the main segment in the configuration CDI. This is laid out at
 /// origin 128 to give space for the ACDI user data at the beginning.

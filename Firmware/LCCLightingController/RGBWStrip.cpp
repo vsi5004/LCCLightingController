@@ -12,7 +12,9 @@ RGBWStrip::RGBWStrip(Node *node, const RGBWConfig &cfg, ADS1115_WE *adc)
       strip_(nullptr), isController_(false),
       currentR_(0), currentG_(0), currentB_(0), currentW_(0), currentBrightness_(255),
       lastSentR_(0), lastSentG_(0), lastSentB_(0), lastSentW_(0), lastSentBrightness_(255),
-      adcChannelIndex_(0) {
+      adcChannelIndex_(0), lastEventSendTime_(0), startupAnimationComplete_(false),
+      animState_(ANIM_IDLE), animTargetR_(0), animTargetG_(0), animTargetB_(0), animTargetW_(0),
+      animBrightness_(0), animLastUpdate_(0), animStep_(0) {
     for (int i = 0; i < 5; i++) {
         eventIds_[i] = 0;
         eventHandlers_[i] = nullptr;
@@ -30,6 +32,12 @@ ConfigUpdateListener::UpdateAction RGBWStrip::apply_configuration(int fd, bool i
                                             BarrierNotifiable *done) {
     AutoNotify n(done);
 
+    // Check if file descriptor is valid
+    if (fd < 0) {
+        Serial.printf("ERROR: Invalid file descriptor in apply_configuration (fd=%d)\n", fd);
+        return REINIT_NEEDED;
+    }
+
     uint16_t ledCount = cfg_.led_count().read(fd);
     // Sanity check - use default if invalid
     if (ledCount == 0 || ledCount == 0xFFFF || ledCount > 1000) {
@@ -37,20 +45,13 @@ ConfigUpdateListener::UpdateAction RGBWStrip::apply_configuration(int fd, bool i
         Serial.printf("Invalid LED count, using default: %d\n", ledCount);
     }
     
-    uint8_t configuredController = cfg_.is_controller().read(fd);
-    // Auto-detect: if config is at default (255/0xFF) and ADS1115 is present, become controller
-    if (configuredController == 0xFF || configuredController > 1) {
-        // Auto-detect mode (ADC is already initialized in main setup)
-        if (adc_) {
-            isController_ = true;
-            Serial.println("Auto-detect: ADS1115 found - configured as CONTROLLER");
-        } else {
-            isController_ = false;
-            Serial.println("Auto-detect: No ADS1115 - configured as FOLLOWER");
-        }
+    // Auto-detect controller mode based on ADC presence
+    if (adc_ && !adc_->isDisconnected()) {
+        isController_ = true;
+        Serial.println("Auto-detect: ADS1115 detected - configured as CONTROLLER");
     } else {
-        // Explicit configuration: 0=follower, 1=controller
-        isController_ = (configuredController == 1);
+        isController_ = false;
+        Serial.println("Auto-detect: No ADS1115 - configured as FOLLOWER");
     }
     
     // Read event IDs for each channel
@@ -60,7 +61,7 @@ ConfigUpdateListener::UpdateAction RGBWStrip::apply_configuration(int fd, bool i
     eventIds_[3] = cfg_.white_event().read(fd);
     eventIds_[4] = cfg_.brightness_event().read(fd);
     
-    Serial.printf("Event IDs - R:0x%012llX G:0x%012llX B:0x%012llX W:0x%012llX Br:0x%012llX\n",
+    Serial.printf("Event IDs - R:0x%016llX G:0x%016llX B:0x%016llX W:0x%016llX Br:0x%016llX\n",
                  eventIds_[0], eventIds_[1], eventIds_[2], eventIds_[3], eventIds_[4]);
 
     // Reinitialize NeoPixel strip if parameters changed
@@ -68,7 +69,7 @@ ConfigUpdateListener::UpdateAction RGBWStrip::apply_configuration(int fd, bool i
         if (strip_) delete strip_;
         strip_ = new Adafruit_NeoPixel(ledCount, NEOPIXEL_PIN, NEO_WRGB + NEO_KHZ800);
         strip_->begin();
-        strip_->setBrightness(currentBrightness_);
+        strip_->setBrightness(0);  // Start with brightness 0 for clean fade-in
         strip_->fill(strip_->Color(0, 0, 0, 0));
         strip_->show();
         Serial.printf("NeoPixel initialized: %d LEDs on pin %d\n", ledCount, NEOPIXEL_PIN);
@@ -98,7 +99,6 @@ ConfigUpdateListener::UpdateAction RGBWStrip::apply_configuration(int fd, bool i
 void RGBWStrip::factory_reset(int fd) {
     cfg_.description().write(fd, "");
     CDI_FACTORY_RESET(cfg_.led_count);
-    CDI_FACTORY_RESET(cfg_.is_controller);
     cfg_.red_event().write(fd, RGBW_EVENT_INIT[0]);
     cfg_.green_event().write(fd, RGBW_EVENT_INIT[1]);
     cfg_.blue_event().write(fd, RGBW_EVENT_INIT[2]);
@@ -106,15 +106,127 @@ void RGBWStrip::factory_reset(int fd) {
     cfg_.brightness_event().write(fd, RGBW_EVENT_INIT[4]);
 }
 
+void RGBWStrip::run_startup_animation() {
+    if (!isController_ || !strip_) return;
+    
+    // Start the non-blocking animation state machine
+    animState_ = ANIM_READ_ADC;
+    animStep_ = 0;
+    animLastUpdate_ = millis();
+    Serial.println("Starting startup animation...");
+}
+
+void RGBWStrip::poll_startup_animation() {
+    static const ADS1115_MUX channels[4] = {
+        ADS1115_COMP_0_GND, ADS1115_COMP_1_GND,
+        ADS1115_COMP_2_GND, ADS1115_COMP_3_GND
+    };
+    
+    switch (animState_) {
+        case ANIM_READ_ADC:
+            // Read all 4 ADC channels
+            if (animStep_ < 4) {
+                adc_->setCompareChannels(channels[animStep_]);
+                float voltage = adc_->getResult_mV();
+                long clamped = constrain((long)voltage, 0, 3300);
+                uint8_t mapped = map(clamped, 0, 3300, 0, 255);
+                
+                switch(animStep_) {
+                    case 0: animTargetR_ = mapped; break;
+                    case 1: animTargetG_ = mapped; break;
+                    case 2: animTargetB_ = mapped; break;
+                    case 3: animTargetW_ = mapped; break;
+                }
+                animStep_++;
+            } else {
+                Serial.printf("Startup animation: Fading to R=%d G=%d B=%d W=%d\n", 
+                             animTargetR_, animTargetG_, animTargetB_, animTargetW_);
+                
+                // Set brightness to 0 and prepare colors
+                send_channel_event(4, 0);
+                strip_->fill(strip_->Color(animTargetR_, animTargetG_, animTargetB_, animTargetW_));
+                strip_->setBrightness(0);
+                strip_->show();
+                
+                animState_ = ANIM_SEND_COLORS;
+                animStep_ = 0;
+                animLastUpdate_ = millis();
+            }
+            break;
+            
+        case ANIM_SEND_COLORS:
+            // Send color events one at a time 
+            if (millis() - animLastUpdate_ >= 10) {
+                switch(animStep_) {
+                    case 0: send_channel_event(0, animTargetR_); break;
+                    case 1: send_channel_event(1, animTargetG_); break;
+                    case 2: send_channel_event(2, animTargetB_); break;
+                    case 3: send_channel_event(3, animTargetW_); break;
+                }
+                animStep_++;
+                animLastUpdate_ = millis();
+                
+                if (animStep_ >= 4) {
+                    animState_ = ANIM_FADE_BRIGHTNESS;
+                    animBrightness_ = 0;
+                    animLastUpdate_ = millis();
+                }
+            }
+            break;
+            
+        case ANIM_FADE_BRIGHTNESS:
+            // Ramp brightness 0→255 over 3 seconds (12ms per step)
+            if (millis() - animLastUpdate_ >= 12) {
+                send_channel_event(4, animBrightness_);
+                strip_->fill(strip_->Color(animTargetR_, animTargetG_, animTargetB_, animTargetW_));
+                strip_->setBrightness(animBrightness_);
+                strip_->show();
+                
+                animBrightness_++;
+                animLastUpdate_ = millis();
+                
+                if (animBrightness_ > 255) {
+                    // Animation complete - sync current values with what was sent
+                    currentR_ = animTargetR_;
+                    currentG_ = animTargetG_;
+                    currentB_ = animTargetB_;
+                    currentW_ = animTargetW_;
+                    lastSentR_ = animTargetR_;
+                    lastSentG_ = animTargetG_;
+                    lastSentB_ = animTargetB_;
+                    lastSentW_ = animTargetW_;
+                    lastSentBrightness_ = 255;
+                    
+                    // Reset ADC for normal polling
+                    adcChannelIndex_ = 0;
+                    adc_->setCompareChannels(channels[0]);
+                    startupAnimationComplete_ = true;
+                    animState_ = ANIM_IDLE;
+                    Serial.println("Startup animation complete");
+                }
+            }
+            break;
+            
+        case ANIM_IDLE:
+        default:
+            break;
+    }
+}
+
 void RGBWStrip::poll_adc_inputs() {
-    if (!isController_ || !adc_) return;
+    if (!isController_ || !adc_ || adc_->isDisconnected()) return;
+    
+    // Run startup animation state machine if active
+    if (!startupAnimationComplete_) {
+        poll_startup_animation();
+        return;
+    }
 
     static const ADS1115_MUX channels[4] = {
         ADS1115_COMP_0_GND, ADS1115_COMP_1_GND,
         ADS1115_COMP_2_GND, ADS1115_COMP_3_GND
     };
     
-    static bool firstCycle = true;
     static bool initialized = false;
     
     // On first call, just set up the first channel
@@ -130,30 +242,26 @@ void RGBWStrip::poll_adc_inputs() {
     long clamped = constrain((long)voltage, 0, 3300);
     uint8_t mapped = map(clamped, 0, 3300, 0, 255);
 
+    // Hysteresis: ignore changes < 2 to reduce jitter
     bool changed = false;
     switch (adcChannelIndex_) {
-        case 0: if (mapped != currentR_) { currentR_ = mapped; changed = true; } break;
-        case 1: if (mapped != currentG_) { currentG_ = mapped; changed = true; } break;
-        case 2: if (mapped != currentB_) { currentB_ = mapped; changed = true; } break;
-        case 3: if (mapped != currentW_) { currentW_ = mapped; changed = true; } break;
+        case 0: if (abs((int)mapped - (int)currentR_) >= 2) { currentR_ = mapped; changed = true; } break;
+        case 1: if (abs((int)mapped - (int)currentG_) >= 2) { currentG_ = mapped; changed = true; } break;
+        case 2: if (abs((int)mapped - (int)currentB_) >= 2) { currentB_ = mapped; changed = true; } break;
+        case 3: if (abs((int)mapped - (int)currentW_) >= 2) { currentW_ = mapped; changed = true; } break;
     }
 
     // Move to next channel and set it up for next read
     adcChannelIndex_ = (adcChannelIndex_ + 1) % 4;
     adc_->setCompareChannels(channels[adcChannelIndex_]);
     
-    // Update strip after reading all 4 channels (even if no change, for first cycle)
+    // Update strip when all 4 channels read or when changed
     if (adcChannelIndex_ == 0 || changed) {
-        if (firstCycle && adcChannelIndex_ == 0) {
-            Serial.printf("Initial RGBW: R=%d G=%d B=%d W=%d\n", 
-                         currentR_, currentG_, currentB_, currentW_);
-            firstCycle = false;
-        }
-        
         update_strip(currentR_, currentG_, currentB_, currentW_);
         
-        // Send events for any changed channels
-        if (changed) {
+        // Send events for any changed channels (rate limited to prevent CAN bus flooding)
+        // Maximum 1 event burst every 50ms
+        if (changed && (millis() - lastEventSendTime_ >= 50)) {
             if (currentR_ != lastSentR_) {
                 send_channel_event(0, currentR_);
                 lastSentR_ = currentR_;
@@ -170,6 +278,7 @@ void RGBWStrip::poll_adc_inputs() {
                 send_channel_event(3, currentW_);
                 lastSentW_ = currentW_;
             }
+            lastEventSendTime_ = millis();
             Serial.printf("RGBW Update: R=%d G=%d B=%d W=%d Brightness=%d\n",
                          currentR_, currentG_, currentB_, currentW_, currentBrightness_);
         }
@@ -186,9 +295,6 @@ void RGBWStrip::send_channel_event(int channel, uint8_t value) {
     msg->data()->reset(Defs::MTI_EVENT_REPORT, node_->node_id(), 
                       eventid_to_buffer(encoded_event));
     node_->iface()->global_message_write_flow()->send(msg);
-    
-    const char* names[] = {"Red", "Green", "Blue", "White", "Brightness"};
-    Serial.printf("Sent %s event: 0x%012llX (value=%d)\n", names[channel], encoded_event, value);
 }
 
 void RGBWStrip::handle_channel_event(int channel, uint8_t value) {
@@ -223,11 +329,11 @@ void RGBWStrip::update_strip(uint8_t r, uint8_t g, uint8_t b, uint8_t w) {
 
 RGBWEventHandler::RGBWEventHandler(RGBWStrip *parent, int channel)
     : parent_(parent), channel_(channel) {
-    // Register this handler for a range of 256 events (base + 0-255)
-    // The mask is applied to the lower 32 bits only in OpenMRN
-    // We use 0xFFFFFF00 to mask the lower byte, allowing values 0-255
+    // Register with base event (lower byte = 0) and mask 8 bits (256 values)
+    // The mask parameter is the NUMBER OF BITS to mask, not a bitmask
+    uint64_t base = parent_->event_id(channel) & 0xFFFFFFFFFFFFFF00ULL;
     EventRegistry::instance()->register_handler(
-        EventRegistryEntry(this, parent_->event_id(channel), 0xFFFFFF00), 0);
+        EventRegistryEntry(this, base), 8);
 }
 
 uint64_t RGBWEventHandler::base_event_id() const {
@@ -239,12 +345,14 @@ void RGBWEventHandler::handle_event_report(const EventRegistryEntry &entry,
                                            BarrierNotifiable *done) {
     AutoNotify an(done);
     
+    // Extract value from lower byte
+    uint8_t value = event->event & 0xFF;
+    
     // Check if this event matches our base (top 56 bits)
     uint64_t received_base = event->event & 0xFFFFFFFFFFFFFF00ULL;
+    uint64_t expected_base = base_event_id();
     
-    if (received_base == base_event_id()) {
-        // Extract value from lower byte
-        uint8_t value = event->event & 0xFF;
+    if (received_base == expected_base) {
         parent_->handle_channel_event(channel_, value);
     }
 }

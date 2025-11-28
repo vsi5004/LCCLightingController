@@ -53,6 +53,12 @@ public:
     /// Controller: Poll ADC channels and send events if changed
     void poll_adc_inputs();
 
+    /// Controller: Run startup animation (fade from black to target colors)
+    void run_startup_animation();
+    
+    /// Controller: Non-blocking startup animation state machine
+    void poll_startup_animation();
+
     /// Follower: Handle incoming channel value event
     void handle_channel_event(int channel, uint8_t value);
 
@@ -81,6 +87,16 @@ private:
     uint8_t lastSentR_, lastSentG_, lastSentB_, lastSentW_, lastSentBrightness_;
     
     uint8_t adcChannelIndex_;
+    unsigned long lastEventSendTime_;  // Rate limiting for CAN bus
+    bool startupAnimationComplete_;    // Track if startup fade-in is done
+    
+    // Startup animation state machine
+    enum AnimationState { ANIM_IDLE, ANIM_READ_ADC, ANIM_SEND_COLORS, ANIM_FADE_BRIGHTNESS };
+    AnimationState animState_;
+    uint8_t animTargetR_, animTargetG_, animTargetB_, animTargetW_;
+    int animBrightness_;
+    unsigned long animLastUpdate_;
+    int animStep_;
     
     RGBWEventHandler *eventHandlers_[5];  // One handler per channel
     
