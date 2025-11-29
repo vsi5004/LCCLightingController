@@ -98,6 +98,12 @@ private:
     unsigned long animLastUpdate_;
     int animStep_;
     
+    // Periodic sync for controller
+    uint16_t syncIntervalSec_;        // Sync interval in seconds (0 = disabled)
+    unsigned long lastSyncTime_;       // Last time we sent a full sync
+    int syncStep_;                     // Current step in sync sequence (-1 = idle)
+    unsigned long lastSyncStepTime_;   // Time of last sync step
+    
     RGBWEventHandler *eventHandlers_[5];  // One handler per channel
     
     friend class RGBWEventHandler;

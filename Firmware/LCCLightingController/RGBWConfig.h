@@ -33,6 +33,11 @@ CDI_GROUP_ENTRY(led_count, openlcb::Uint16ConfigEntry,
     Name("LED Count"),
     Description("Number of LEDs in the NeoPixel strip."));
 
+CDI_GROUP_ENTRY(sync_interval, openlcb::Uint16ConfigEntry,
+    Default(3), Min(0), Max(60),
+    Name("Sync Interval (seconds)"),
+    Description("Controller only: How often to broadcast current RGBW state to keep followers in sync. Set to 0 to disable."));
+
 CDI_GROUP_END();
 
 #endif // __RGBWCONFIG_HXX

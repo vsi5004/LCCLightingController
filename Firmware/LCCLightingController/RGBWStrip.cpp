@@ -14,7 +14,8 @@ RGBWStrip::RGBWStrip(Node *node, const RGBWConfig &cfg, ADS1115_WE *adc)
       lastSentR_(0), lastSentG_(0), lastSentB_(0), lastSentW_(0), lastSentBrightness_(255),
       adcChannelIndex_(0), lastEventSendTime_(0), startupAnimationComplete_(false),
       animState_(ANIM_IDLE), animTargetR_(0), animTargetG_(0), animTargetB_(0), animTargetW_(0),
-      animBrightness_(0), animLastUpdate_(0), animStep_(0) {
+      animBrightness_(0), animLastUpdate_(0), animStep_(0),
+      syncIntervalSec_(3), lastSyncTime_(0), syncStep_(-1), lastSyncStepTime_(0) {
     for (int i = 0; i < 5; i++) {
         eventIds_[i] = 0;
         eventHandlers_[i] = nullptr;
@@ -69,9 +70,9 @@ ConfigUpdateListener::UpdateAction RGBWStrip::apply_configuration(int fd, bool i
         if (strip_) delete strip_;
         strip_ = new Adafruit_NeoPixel(ledCount, NEOPIXEL_PIN, NEO_WRGB + NEO_KHZ800);
         strip_->begin();
-        strip_->setBrightness(0);  // Start with brightness 0 for clean fade-in
-        strip_->fill(strip_->Color(0, 0, 0, 0));
-        strip_->show();
+        //strip_->setBrightness(0);  // Start with brightness 0 for clean fade-in
+        //strip_->fill(strip_->Color(0, 0, 0, 0));
+        //strip_->show();
         Serial.printf("NeoPixel initialized: %d LEDs on pin %d\n", ledCount, NEOPIXEL_PIN);
     }
 
@@ -84,6 +85,10 @@ ConfigUpdateListener::UpdateAction RGBWStrip::apply_configuration(int fd, bool i
         }
         Serial.println("Event handlers registered for all channels");
     } else {
+        // Controller: read sync interval config
+        syncIntervalSec_ = cfg_.sync_interval().read(fd);
+        if (syncIntervalSec_ > 60) syncIntervalSec_ = 3; // Sanity check
+        Serial.printf("Controller sync interval: %d seconds\n", syncIntervalSec_);
         Serial.println("Controller mode - event handlers not registered (send only)");
     }
 
@@ -281,6 +286,36 @@ void RGBWStrip::poll_adc_inputs() {
             lastEventSendTime_ = millis();
             Serial.printf("RGBW Update: R=%d G=%d B=%d W=%d Brightness=%d\n",
                          currentR_, currentG_, currentB_, currentW_, currentBrightness_);
+        }
+    }
+    
+    // Periodic sync for followers (controller only)
+    if (syncIntervalSec_ > 0) {
+        unsigned long syncIntervalMs = syncIntervalSec_ * 1000UL;
+        
+        // Check if it's time to start a new sync sequence
+        if (syncStep_ < 0 && (millis() - lastSyncTime_ >= syncIntervalMs)) {
+            syncStep_ = 0;
+            lastSyncStepTime_ = millis();
+        }
+        
+        // Run sync sequence - send one channel every 20ms
+        if (syncStep_ >= 0 && (millis() - lastSyncStepTime_ >= 20)) {
+            switch (syncStep_) {
+                case 0: send_channel_event(0, currentR_); break;
+                case 1: send_channel_event(1, currentG_); break;
+                case 2: send_channel_event(2, currentB_); break;
+                case 3: send_channel_event(3, currentW_); break;
+                case 4: send_channel_event(4, currentBrightness_); break;
+            }
+            lastSyncStepTime_ = millis();
+            syncStep_++;
+            
+            if (syncStep_ > 4) {
+                // Sync sequence complete
+                syncStep_ = -1;
+                lastSyncTime_ = millis();
+            }
         }
     }
 }
