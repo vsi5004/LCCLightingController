@@ -13,9 +13,11 @@ RGBWStrip::RGBWStrip(Node *node, const RGBWConfig &cfg, ADS1115_WE *adc)
       currentR_(0), currentG_(0), currentB_(0), currentW_(0), currentBrightness_(255),
       lastSentR_(0), lastSentG_(0), lastSentB_(0), lastSentW_(0), lastSentBrightness_(255),
       adcChannelIndex_(0), lastEventSendTime_(0), startupAnimationComplete_(false),
+      lastShowTime_(0), stripDirty_(false),
       animState_(ANIM_IDLE), animTargetR_(0), animTargetG_(0), animTargetB_(0), animTargetW_(0),
       animBrightness_(0), animLastUpdate_(0), animStep_(0),
-      syncIntervalSec_(3), lastSyncTime_(0), syncStep_(-1), lastSyncStepTime_(0) {
+      syncIntervalSec_(3), lastSyncTime_(0), syncStep_(-1), lastSyncStepTime_(0),
+      startupDelaySec_(5) {
     for (int i = 0; i < 5; i++) {
         eventIds_[i] = 0;
         eventHandlers_[i] = nullptr;
@@ -85,10 +87,13 @@ ConfigUpdateListener::UpdateAction RGBWStrip::apply_configuration(int fd, bool i
         }
         Serial.println("Event handlers registered for all channels");
     } else {
-        // Controller: read sync interval config
+        // Controller: read sync interval and startup delay config
         syncIntervalSec_ = cfg_.sync_interval().read(fd);
         if (syncIntervalSec_ > 60) syncIntervalSec_ = 3; // Sanity check
+        startupDelaySec_ = cfg_.startup_delay().read(fd);
+        if (startupDelaySec_ > 30) startupDelaySec_ = 5; // Sanity check
         Serial.printf("Controller sync interval: %d seconds\n", syncIntervalSec_);
+        Serial.printf("Controller startup delay: %d seconds\n", startupDelaySec_);
         Serial.println("Controller mode - event handlers not registered (send only)");
     }
 
@@ -147,11 +152,12 @@ void RGBWStrip::poll_startup_animation() {
                 Serial.printf("Startup animation: Fading to R=%d G=%d B=%d W=%d\n", 
                              animTargetR_, animTargetG_, animTargetB_, animTargetW_);
                 
-                // Set brightness to 0 and prepare colors
-                send_channel_event(4, 0);
+                // Set brightness to 0 and prepare colors - update local LEDs first, then send event
                 strip_->fill(strip_->Color(animTargetR_, animTargetG_, animTargetB_, animTargetW_));
                 strip_->setBrightness(0);
-                strip_->show();
+                stripDirty_ = true;
+                flush_strip();
+                send_channel_event(4, 0);
                 
                 animState_ = ANIM_SEND_COLORS;
                 animStep_ = 0;
@@ -180,17 +186,25 @@ void RGBWStrip::poll_startup_animation() {
             break;
             
         case ANIM_FADE_BRIGHTNESS:
-            // Ramp brightness 0→255 over 3 seconds (12ms per step)
-            if (millis() - animLastUpdate_ >= 12) {
-                send_channel_event(4, animBrightness_);
+            // Ramp brightness 0→255 over ~5 seconds (40ms per step, increment by 2)
+            if (millis() - animLastUpdate_ >= 40) {
+                // Update LEDs first, then send event to reduce interrupt conflicts
                 strip_->fill(strip_->Color(animTargetR_, animTargetG_, animTargetB_, animTargetW_));
                 strip_->setBrightness(animBrightness_);
-                strip_->show();
+                stripDirty_ = true;
+                flush_strip();
+                send_channel_event(4, animBrightness_);
                 
-                animBrightness_++;
+                animBrightness_ += 2;
                 animLastUpdate_ = millis();
                 
                 if (animBrightness_ > 255) {
+                    // Ensure we end at exactly 255
+                    strip_->setBrightness(255);
+                    stripDirty_ = true;
+                    flush_strip();
+                    send_channel_event(4, 255);
+                    
                     // Animation complete - sync current values with what was sent
                     currentR_ = animTargetR_;
                     currentG_ = animTargetG_;
@@ -260,13 +274,15 @@ void RGBWStrip::poll_adc_inputs() {
     adcChannelIndex_ = (adcChannelIndex_ + 1) % 4;
     adc_->setCompareChannels(channels[adcChannelIndex_]);
     
-    // Update strip when all 4 channels read or when changed
-    if (adcChannelIndex_ == 0 || changed) {
+    // Update strip only when values actually change
+    if (changed) {
+        // Update LEDs first, then send events to reduce interrupt conflicts
         update_strip(currentR_, currentG_, currentB_, currentW_);
+        flush_strip();
         
         // Send events for any changed channels (rate limited to prevent CAN bus flooding)
         // Maximum 1 event burst every 50ms
-        if (changed && (millis() - lastEventSendTime_ >= 50)) {
+        if (millis() - lastEventSendTime_ >= 50) {
             if (currentR_ != lastSentR_) {
                 send_channel_event(0, currentR_);
                 lastSentR_ = currentR_;
@@ -318,6 +334,9 @@ void RGBWStrip::poll_adc_inputs() {
             }
         }
     }
+    
+    // Flush any pending strip updates (rate-limited)
+    flush_strip();
 }
 
 void RGBWStrip::send_channel_event(int channel, uint8_t value) {
@@ -349,13 +368,25 @@ void RGBWStrip::handle_channel_event(int channel, uint8_t value) {
     }
     
     update_strip(currentR_, currentG_, currentB_, currentW_);
+    flush_strip();  // Immediately flush for follower responsiveness
     Serial.printf("Received %s event: value=%d\n", names[channel], value);
 }
 
 void RGBWStrip::update_strip(uint8_t r, uint8_t g, uint8_t b, uint8_t w) {
     if (!strip_) return;
     strip_->fill(strip_->Color(r, g, b, strip_->gamma8(w)));
-    strip_->show();
+    stripDirty_ = true;
+}
+
+void RGBWStrip::flush_strip() {
+    if (!strip_ || !stripDirty_) return;
+    
+    unsigned long now = millis();
+    if (now - lastShowTime_ >= MIN_SHOW_INTERVAL_MS) {
+        strip_->show();
+        lastShowTime_ = now;
+        stripDirty_ = false;
+    }
 }
 
 // ============================================================================

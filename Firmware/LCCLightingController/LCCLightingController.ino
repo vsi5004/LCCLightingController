@@ -14,20 +14,20 @@ static constexpr openlcb::ConfigDef cfg(0);
 static constexpr uint8_t NUM_RGBW_STRIPS = openlcb::NUM_RGBW_STRIPS;
 
 namespace openlcb {
-// Define SNIP_STATIC_DATA (declared in config.h)
-const SimpleNodeStaticValues SNIP_STATIC_DATA = {
-    4,
-    "OpenMRN",
-    "LCC RGBW Lighting Controller",
-    ARDUINO_VARIANT,
-    "1.0.0"
-};
+  // Define SNIP_STATIC_DATA (declared in config.h)
+  const SimpleNodeStaticValues SNIP_STATIC_DATA = {
+      4,
+      "OpenMRN",
+      "LCC RGBW Lighting Controller",
+      ARDUINO_VARIANT,
+      "1.0.0"
+  };
 
-const char CDI_FILENAME[] = "/spiffs/cdi.xml";
-extern const char CDI_DATA[] = "";
-extern const char *const CONFIG_FILENAME = "/spiffs/openlcb_config";
-extern const size_t CONFIG_FILE_SIZE = cfg.seg().size() + cfg.seg().offset();
-extern const char *const SNIP_DYNAMIC_FILENAME = CONFIG_FILENAME;
+  const char CDI_FILENAME[] = "/spiffs/cdi.xml";
+  extern const char CDI_DATA[] = "";
+  extern const char *const CONFIG_FILENAME = "/spiffs/openlcb_config";
+  extern const size_t CONFIG_FILE_SIZE = cfg.seg().size() + cfg.seg().offset();
+  extern const char *const SNIP_DYNAMIC_FILENAME = CONFIG_FILENAME;
 }
 
 ADS1115_WE adc = ADS1115_WE();
@@ -37,11 +37,16 @@ OpenMRN openmrn(NODE_ID);
 openlcb::RGBWStrip *rgbwStrip = nullptr;
 bool isController = false;
 
+// Track when to start the fade animation
+static unsigned long initCompleteTime = 0;
+static bool fadeStarted = false;
+
+
 void setup() {
   Serial.begin(115200);
   Wire.begin();
 
-  sleep(2);
+  sleep(1);
 
   Serial.println("\n\n=== LCC RGBW Lighting Controller ===");
   Serial.printf("Node ID: 0x%012llX\n", NODE_ID);
@@ -116,16 +121,25 @@ void setup() {
   digitalWrite(LED_BUILTIN, LOW);
 
   Serial.println("=== Initialization Complete ===\n");
-  
-  // Run startup animation if this is a controller
-  if (isController) {
-    Serial.println("Starting fade-in animation...");
-    rgbwStrip->run_startup_animation();
-  }
 }
 
 void loop() {
   openmrn.loop();
+
+  // Record init complete time on first loop iteration
+  if (initCompleteTime == 0) {
+    initCompleteTime = millis();
+  }
+
+  // Controller: Start fade animation after configured delay (allows LCC bus to settle)
+  if (isController && !fadeStarted) {
+    unsigned long delayMs = rgbwStrip->startup_delay_sec() * 1000UL;
+    if (millis() - initCompleteTime >= delayMs) {
+      Serial.printf("Starting fade-in animation (after %d sec delay)...\n", rgbwStrip->startup_delay_sec());
+      rgbwStrip->run_startup_animation();
+      fadeStarted = true;
+    }
+  }
 
   // Controller: Poll ADC inputs every 10ms (only if this device is a controller)
   if (isController) {

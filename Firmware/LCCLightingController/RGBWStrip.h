@@ -64,12 +64,18 @@ public:
 
     /// Controller: Send individual channel event
     void send_channel_event(int channel, uint8_t value);
+    
+    /// Flush pending strip updates (rate-limited)
+    void flush_strip();
 
     /// Get node pointer
     Node* node() { return node_; }
     
     /// Get event ID for specific channel (0=R, 1=G, 2=B, 3=W, 4=Brightness)
     uint64_t event_id(int channel) { return eventIds_[channel]; }
+    
+    /// Get startup delay in seconds (controller only)
+    uint16_t startup_delay_sec() { return startupDelaySec_; }
 
 private:
     void update_strip(uint8_t r, uint8_t g, uint8_t b, uint8_t w);
@@ -90,6 +96,11 @@ private:
     unsigned long lastEventSendTime_;  // Rate limiting for CAN bus
     bool startupAnimationComplete_;    // Track if startup fade-in is done
     
+    // NeoPixel rate limiting (minimum ~16ms between show() calls = 60fps)
+    static constexpr unsigned long MIN_SHOW_INTERVAL_MS = 16;
+    unsigned long lastShowTime_;       // Last time show() was called
+    bool stripDirty_;                  // True if strip needs updating
+    
     // Startup animation state machine
     enum AnimationState { ANIM_IDLE, ANIM_READ_ADC, ANIM_SEND_COLORS, ANIM_FADE_BRIGHTNESS };
     AnimationState animState_;
@@ -103,6 +114,7 @@ private:
     unsigned long lastSyncTime_;       // Last time we sent a full sync
     int syncStep_;                     // Current step in sync sequence (-1 = idle)
     unsigned long lastSyncStepTime_;   // Time of last sync step
+    uint16_t startupDelaySec_;        // Startup delay before fade animation
     
     RGBWEventHandler *eventHandlers_[5];  // One handler per channel
     

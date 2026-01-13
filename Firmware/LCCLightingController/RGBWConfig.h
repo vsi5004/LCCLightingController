@@ -38,6 +38,11 @@ CDI_GROUP_ENTRY(sync_interval, openlcb::Uint16ConfigEntry,
     Name("Sync Interval (seconds)"),
     Description("Controller only: How often to broadcast current RGBW state to keep followers in sync. Set to 0 to disable."));
 
+CDI_GROUP_ENTRY(startup_delay, openlcb::Uint16ConfigEntry,
+    Default(5), Min(0), Max(30),
+    Name("Startup Delay (seconds)"),
+    Description("Controller only: Delay before starting fade-in animation. Allows LCC bus to settle after power-on. Set to 0 to disable."));
+
 CDI_GROUP_END();
 
 #endif // __RGBWCONFIG_HXX
