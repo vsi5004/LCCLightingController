@@ -1,5 +1,5 @@
-#ifndef __RGBWCONFIG_HXX
-#define __RGBWCONFIG_HXX
+#ifndef __RGBWCONFIG_H
+#define __RGBWCONFIG_H
 
 #include "openlcb/ConfigRepresentation.hxx"
 
@@ -45,4 +45,4 @@ CDI_GROUP_ENTRY(startup_delay, openlcb::Uint16ConfigEntry,
 
 CDI_GROUP_END();
 
-#endif // __RGBWCONFIG_HXX
+#endif // __RGBWCONFIG_H

@@ -35,17 +35,23 @@ ConfigUpdateListener::UpdateAction RGBWStrip::apply_configuration(int fd, bool i
                                             BarrierNotifiable *done) {
     AutoNotify n(done);
 
+    // Default values to use if config cannot be read
+    uint16_t ledCount = DEFAULT_LED_COUNT;
+    bool useDefaults = false;
+
     // Check if file descriptor is valid
     if (fd < 0) {
-        Serial.printf("ERROR: Invalid file descriptor in apply_configuration (fd=%d)\n", fd);
-        return REINIT_NEEDED;
+        Serial.printf("WARNING: Invalid file descriptor (fd=%d), using default configuration\n", fd);
+        useDefaults = true;
     }
 
-    uint16_t ledCount = cfg_.led_count().read(fd);
-    // Sanity check - use default if invalid
-    if (ledCount == 0 || ledCount == 0xFFFF || ledCount > 1000) {
-        ledCount = 120; // default value
-        Serial.printf("Invalid LED count, using default: %d\n", ledCount);
+    if (!useDefaults) {
+        ledCount = cfg_.led_count().read(fd);
+        // Sanity check - use default if invalid
+        if (ledCount == 0 || ledCount == 0xFFFF || ledCount > 1000) {
+            ledCount = DEFAULT_LED_COUNT;
+            Serial.printf("Invalid LED count, using default: %d\n", ledCount);
+        }
     }
     
     // Auto-detect controller mode based on ADC presence
@@ -57,12 +63,21 @@ ConfigUpdateListener::UpdateAction RGBWStrip::apply_configuration(int fd, bool i
         Serial.println("Auto-detect: No ADS1115 - configured as FOLLOWER");
     }
     
-    // Read event IDs for each channel
-    eventIds_[0] = cfg_.red_event().read(fd);
-    eventIds_[1] = cfg_.green_event().read(fd);
-    eventIds_[2] = cfg_.blue_event().read(fd);
-    eventIds_[3] = cfg_.white_event().read(fd);
-    eventIds_[4] = cfg_.brightness_event().read(fd);
+    // Read event IDs for each channel (use defaults if fd invalid)
+    if (!useDefaults) {
+        eventIds_[0] = cfg_.red_event().read(fd);
+        eventIds_[1] = cfg_.green_event().read(fd);
+        eventIds_[2] = cfg_.blue_event().read(fd);
+        eventIds_[3] = cfg_.white_event().read(fd);
+        eventIds_[4] = cfg_.brightness_event().read(fd);
+    } else {
+        // Use default event IDs from config.h
+        eventIds_[0] = RGBW_EVENT_INIT[0];
+        eventIds_[1] = RGBW_EVENT_INIT[1];
+        eventIds_[2] = RGBW_EVENT_INIT[2];
+        eventIds_[3] = RGBW_EVENT_INIT[3];
+        eventIds_[4] = RGBW_EVENT_INIT[4];
+    }
     
     Serial.printf("Event IDs - R:0x%016llX G:0x%016llX B:0x%016llX W:0x%016llX Br:0x%016llX\n",
                  eventIds_[0], eventIds_[1], eventIds_[2], eventIds_[3], eventIds_[4]);
@@ -88,10 +103,13 @@ ConfigUpdateListener::UpdateAction RGBWStrip::apply_configuration(int fd, bool i
         Serial.println("Event handlers registered for all channels");
     } else {
         // Controller: read sync interval and startup delay config
-        syncIntervalSec_ = cfg_.sync_interval().read(fd);
-        if (syncIntervalSec_ > 60) syncIntervalSec_ = 3; // Sanity check
-        startupDelaySec_ = cfg_.startup_delay().read(fd);
-        if (startupDelaySec_ > 30) startupDelaySec_ = 5; // Sanity check
+        if (!useDefaults) {
+            syncIntervalSec_ = cfg_.sync_interval().read(fd);
+            if (syncIntervalSec_ > 60) syncIntervalSec_ = 3; // Sanity check
+            startupDelaySec_ = cfg_.startup_delay().read(fd);
+            if (startupDelaySec_ > 30) startupDelaySec_ = 5; // Sanity check
+        }
+        // If useDefaults, keep constructor default values (syncIntervalSec_=3, startupDelaySec_=5)
         Serial.printf("Controller sync interval: %d seconds\n", syncIntervalSec_);
         Serial.printf("Controller startup delay: %d seconds\n", startupDelaySec_);
         Serial.println("Controller mode - event handlers not registered (send only)");
@@ -194,16 +212,13 @@ void RGBWStrip::poll_startup_animation() {
                 stripDirty_ = true;
                 flush_strip();
                 send_channel_event(4, animBrightness_);
-                
-                animBrightness_ += 2;
                 animLastUpdate_ = millis();
                 
-                if (animBrightness_ > 255) {
-                    // Ensure we end at exactly 255
-                    strip_->setBrightness(255);
-                    stripDirty_ = true;
-                    flush_strip();
-                    send_channel_event(4, 255);
+                // Increment brightness, capping at 255
+                if (animBrightness_ + ANIM_BRIGHTNESS_STEP <= 255) {
+                    animBrightness_ += ANIM_BRIGHTNESS_STEP;
+                } else {
+                    animBrightness_ = 255;
                     
                     // Animation complete - sync current values with what was sent
                     currentR_ = animTargetR_;
@@ -374,7 +389,7 @@ void RGBWStrip::handle_channel_event(int channel, uint8_t value) {
 
 void RGBWStrip::update_strip(uint8_t r, uint8_t g, uint8_t b, uint8_t w) {
     if (!strip_) return;
-    strip_->fill(strip_->Color(r, g, b, strip_->gamma8(w)));
+    strip_->fill(strip_->Color(r, g, b, w));
     stripDirty_ = true;
 }
 

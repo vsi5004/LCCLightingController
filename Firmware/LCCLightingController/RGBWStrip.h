@@ -1,5 +1,5 @@
-#ifndef __RGBWSTRIP_HXX
-#define __RGBWSTRIP_HXX
+#ifndef __RGBWSTRIP_H
+#define __RGBWSTRIP_H
 
 #include <Adafruit_NeoPixel.h>
 #include <ADS1115_WE.h>
@@ -98,6 +98,8 @@ private:
     
     // NeoPixel rate limiting (minimum ~16ms between show() calls = 60fps)
     static constexpr unsigned long MIN_SHOW_INTERVAL_MS = 16;
+    static constexpr uint8_t ANIM_BRIGHTNESS_STEP = 2;  // Brightness increment per animation frame
+    static constexpr uint16_t DEFAULT_LED_COUNT = 120;  // Default LED count if config invalid
     unsigned long lastShowTime_;       // Last time show() was called
     bool stripDirty_;                  // True if strip needs updating
     
@@ -105,7 +107,7 @@ private:
     enum AnimationState { ANIM_IDLE, ANIM_READ_ADC, ANIM_SEND_COLORS, ANIM_FADE_BRIGHTNESS };
     AnimationState animState_;
     uint8_t animTargetR_, animTargetG_, animTargetB_, animTargetW_;
-    int animBrightness_;
+    uint8_t animBrightness_;          // Current brightness during fade animation
     unsigned long animLastUpdate_;
     int animStep_;
     
@@ -123,4 +125,4 @@ private:
 
 } // namespace openlcb
 
-#endif // __RGBWSTRIP_HXX
+#endif // __RGBWSTRIP_H

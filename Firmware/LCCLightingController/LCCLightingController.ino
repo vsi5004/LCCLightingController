@@ -46,7 +46,7 @@ void setup() {
   Serial.begin(115200);
   Wire.begin();
 
-  sleep(1);
+  delay(1000);
 
   Serial.println("\n\n=== LCC RGBW Lighting Controller ===");
   Serial.printf("Node ID: 0x%012llX\n", NODE_ID);
@@ -68,12 +68,15 @@ void setup() {
   // Read current version before calling create_config_file_if_needed
   int fd_check = ::open(openlcb::CONFIG_FILENAME, O_RDONLY);
   uint16_t current_version = 0;
+  bool needsFactoryReset = false;
   if (fd_check >= 0) {
     current_version = cfg.seg().internal_config().version().read(fd_check);
     ::close(fd_check);
     Serial.printf("Current stored version: 0x%04X\n", current_version);
+    needsFactoryReset = (current_version != openlcb::CANONICAL_VERSION);
   } else {
     Serial.println("Config file does not exist yet");
+    needsFactoryReset = true;
   }
   
   int config_fd = openmrn.stack()->create_config_file_if_needed(
@@ -102,12 +105,14 @@ void setup() {
     &adc
   );
   
-  // The config file is already open from create_config_file_if_needed
-  // Just call factory_reset using the same fd - it was already reset if needed
-  // but only for event configs, not our custom config
-  Serial.println("Initializing RGBW config defaults...");
-  rgbwStrip->factory_reset(config_fd);
-  Serial.println("RGBW config initialized");
+  // Only reset RGBW config when config file is new or version changed
+  if (needsFactoryReset) {
+    Serial.println("Initializing RGBW config defaults...");
+    rgbwStrip->factory_reset(config_fd);
+    Serial.println("RGBW config initialized");
+  } else {
+    Serial.println("Config file valid, preserving user settings");
+  };
 
   // Initialize OpenMRN stack
   openmrn.begin();
