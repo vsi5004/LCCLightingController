@@ -46,7 +46,7 @@ void setup() {
   Serial.begin(115200);
   Wire.begin();
 
-  delay(1000);
+  delay(100);
 
   Serial.println("\n\n=== LCC RGBW Lighting Controller ===");
   Serial.printf("Node ID: 0x%012llX\n", NODE_ID);
@@ -134,6 +134,11 @@ void loop() {
   // Record init complete time on first loop iteration
   if (initCompleteTime == 0) {
     initCompleteTime = millis();
+  }
+
+  // Follower: Poll fade animation (handles local high-fidelity fade)
+  if (!isController) {
+    rgbwStrip->poll_fade();
   }
 
   // Controller: Start fade animation after configured delay (allows LCC bus to settle)

@@ -28,6 +28,10 @@ CDI_GROUP_ENTRY(brightness_event, openlcb::EventConfigEntry,
     Name("Brightness Event"),
     Description("Event ID base for overall brightness (0-255). Controller produces, followers consume. Must end in 00."));
 
+CDI_GROUP_ENTRY(duration_event, openlcb::EventConfigEntry,
+    Name("Transition Duration Event"),
+    Description("Event ID base for fade duration (0-255 seconds). Triggers fade to pending RGBW+Brightness values. Must end in 00."));
+
 CDI_GROUP_ENTRY(led_count, openlcb::Uint16ConfigEntry,
     Default(120), Min(1), Max(1000),
     Name("LED Count"),

@@ -11,6 +11,10 @@ RGBWStrip::RGBWStrip(Node *node, const RGBWConfig &cfg, ADS1115_WE *adc)
     : node_(node), cfg_(cfg), adc_(adc),
       strip_(nullptr), isController_(false),
       currentR_(0), currentG_(0), currentB_(0), currentW_(0), currentBrightness_(255),
+      pendingR_(0), pendingG_(0), pendingB_(0), pendingW_(0), pendingBrightness_(255),
+      fadeInProgress_(false), fadeStartTime_(0), fadeDurationMs_(0),
+      fadeStartR_(0), fadeStartG_(0), fadeStartB_(0), fadeStartW_(0), fadeStartBrightness_(255),
+      fadeTargetR_(0), fadeTargetG_(0), fadeTargetB_(0), fadeTargetW_(0), fadeTargetBrightness_(255),
       lastSentR_(0), lastSentG_(0), lastSentB_(0), lastSentW_(0), lastSentBrightness_(255),
       adcChannelIndex_(0), lastEventSendTime_(0), startupAnimationComplete_(false),
       lastShowTime_(0), stripDirty_(false),
@@ -18,7 +22,7 @@ RGBWStrip::RGBWStrip(Node *node, const RGBWConfig &cfg, ADS1115_WE *adc)
       animBrightness_(0), animLastUpdate_(0), animStep_(0),
       syncIntervalSec_(3), lastSyncTime_(0), syncStep_(-1), lastSyncStepTime_(0),
       startupDelaySec_(5) {
-    for (int i = 0; i < 5; i++) {
+    for (int i = 0; i < 6; i++) {
         eventIds_[i] = 0;
         eventHandlers_[i] = nullptr;
     }
@@ -26,7 +30,7 @@ RGBWStrip::RGBWStrip(Node *node, const RGBWConfig &cfg, ADS1115_WE *adc)
 
 RGBWStrip::~RGBWStrip() {
     if (strip_) delete strip_;
-    for (int i = 0; i < 5; i++) {
+    for (int i = 0; i < 6; i++) {
         if (eventHandlers_[i]) delete eventHandlers_[i];
     }
 }
@@ -70,6 +74,7 @@ ConfigUpdateListener::UpdateAction RGBWStrip::apply_configuration(int fd, bool i
         eventIds_[2] = cfg_.blue_event().read(fd);
         eventIds_[3] = cfg_.white_event().read(fd);
         eventIds_[4] = cfg_.brightness_event().read(fd);
+        eventIds_[5] = cfg_.duration_event().read(fd);
     } else {
         // Use default event IDs from config.h
         eventIds_[0] = RGBW_EVENT_INIT[0];
@@ -77,10 +82,11 @@ ConfigUpdateListener::UpdateAction RGBWStrip::apply_configuration(int fd, bool i
         eventIds_[2] = RGBW_EVENT_INIT[2];
         eventIds_[3] = RGBW_EVENT_INIT[3];
         eventIds_[4] = RGBW_EVENT_INIT[4];
+        eventIds_[5] = RGBW_EVENT_INIT[5];
     }
     
-    Serial.printf("Event IDs - R:0x%016llX G:0x%016llX B:0x%016llX W:0x%016llX Br:0x%016llX\n",
-                 eventIds_[0], eventIds_[1], eventIds_[2], eventIds_[3], eventIds_[4]);
+    Serial.printf("Event IDs - R:0x%016llX G:0x%016llX B:0x%016llX W:0x%016llX Br:0x%016llX Dur:0x%016llX\n",
+                 eventIds_[0], eventIds_[1], eventIds_[2], eventIds_[3], eventIds_[4], eventIds_[5]);
 
     // Reinitialize NeoPixel strip if parameters changed
     if (!strip_ || strip_->numPixels() != ledCount) {
@@ -95,12 +101,12 @@ ConfigUpdateListener::UpdateAction RGBWStrip::apply_configuration(int fd, bool i
 
     // Register event handlers only for followers (controller only sends, doesn't receive)
     if (!isController_) {
-        for (int i = 0; i < 5; i++) {
+        for (int i = 0; i < 6; i++) {
             if (!eventHandlers_[i]) {
                 eventHandlers_[i] = new RGBWEventHandler(this, i);
             }
         }
-        Serial.println("Event handlers registered for all channels");
+        Serial.println("Event handlers registered for all 6 channels (RGBW+Br+Dur)");
     } else {
         // Controller: read sync interval and startup delay config
         if (!useDefaults) {
@@ -132,6 +138,7 @@ void RGBWStrip::factory_reset(int fd) {
     cfg_.blue_event().write(fd, RGBW_EVENT_INIT[2]);
     cfg_.white_event().write(fd, RGBW_EVENT_INIT[3]);
     cfg_.brightness_event().write(fd, RGBW_EVENT_INIT[4]);
+    cfg_.duration_event().write(fd, RGBW_EVENT_INIT[5]);
 }
 
 void RGBWStrip::run_startup_animation() {
@@ -367,24 +374,62 @@ void RGBWStrip::send_channel_event(int channel, uint8_t value) {
 }
 
 void RGBWStrip::handle_channel_event(int channel, uint8_t value) {
-    const char* names[] = {"Red", "Green", "Blue", "White", "Brightness"};
+    const char* names[] = {"Red", "Green", "Blue", "White", "Brightness", "Duration"};
     
     switch (channel) {
-        case 0: currentR_ = value; break;
-        case 1: currentG_ = value; break;
-        case 2: currentB_ = value; break;
-        case 3: currentW_ = value; break;
-        case 4: 
-            currentBrightness_ = value;
-            if (strip_) {
-                strip_->setBrightness(value);
+        case 0: pendingR_ = value; break;
+        case 1: pendingG_ = value; break;
+        case 2: pendingB_ = value; break;
+        case 3: pendingW_ = value; break;
+        case 4: pendingBrightness_ = value; break;
+        case 5: 
+            // Duration event triggers the fade
+            // Capture current actual values as fade start
+            fadeStartR_ = currentR_;
+            fadeStartG_ = currentG_;
+            fadeStartB_ = currentB_;
+            fadeStartW_ = currentW_;
+            fadeStartBrightness_ = currentBrightness_;
+            
+            // Pending values become fade targets
+            fadeTargetR_ = pendingR_;
+            fadeTargetG_ = pendingG_;
+            fadeTargetB_ = pendingB_;
+            fadeTargetW_ = pendingW_;
+            fadeTargetBrightness_ = pendingBrightness_;
+            
+            // Duration in seconds (0 = instant)
+            fadeDurationMs_ = (unsigned long)value * 1000UL;
+            fadeStartTime_ = millis();
+            
+            // Clear any pending strip writes to prevent flash to stale buffer
+            stripDirty_ = false;
+            
+            if (value == 0) {
+                // Instant apply
+                currentR_ = fadeTargetR_;
+                currentG_ = fadeTargetG_;
+                currentB_ = fadeTargetB_;
+                currentW_ = fadeTargetW_;
+                currentBrightness_ = fadeTargetBrightness_;
+                if (strip_) strip_->setBrightness(currentBrightness_);
+                update_strip(currentR_, currentG_, currentB_, currentW_);
+                flush_strip();
+                fadeInProgress_ = false;
+                Serial.printf("Instant apply: R=%d G=%d B=%d W=%d Br=%d\n",
+                             currentR_, currentG_, currentB_, currentW_, currentBrightness_);
+            } else {
+                fadeInProgress_ = true;
+                Serial.printf("Starting %d sec fade: R=%d->%d G=%d->%d B=%d->%d W=%d->%d Br=%d->%d\n",
+                             value,
+                             fadeStartR_, fadeTargetR_, fadeStartG_, fadeTargetG_,
+                             fadeStartB_, fadeTargetB_, fadeStartW_, fadeTargetW_,
+                             fadeStartBrightness_, fadeTargetBrightness_);
             }
-            break;
+            return;  // Don't print redundant message below
     }
     
-    update_strip(currentR_, currentG_, currentB_, currentW_);
-    flush_strip();  // Immediately flush for follower responsiveness
-    Serial.printf("Received %s event: value=%d\n", names[channel], value);
+    Serial.printf("Received %s event: value=%d (pending)\n", names[channel], value);
 }
 
 void RGBWStrip::update_strip(uint8_t r, uint8_t g, uint8_t b, uint8_t w) {
@@ -396,11 +441,59 @@ void RGBWStrip::update_strip(uint8_t r, uint8_t g, uint8_t b, uint8_t w) {
 void RGBWStrip::flush_strip() {
     if (!strip_ || !stripDirty_) return;
     
+    // Rate limit show() calls to prevent green glitches
+    // NeoPixel needs time to complete transmission to LEDs
     unsigned long now = millis();
     if (now - lastShowTime_ >= MIN_SHOW_INTERVAL_MS) {
         strip_->show();
         lastShowTime_ = now;
         stripDirty_ = false;
+    }
+    // If rate limited, stripDirty_ stays true for next poll_fade() call
+}
+
+void RGBWStrip::poll_fade() {
+    if (!fadeInProgress_ || !strip_) return;
+    
+    unsigned long now = millis();
+    unsigned long elapsed = now - fadeStartTime_;
+    
+    // Calculate progress (0.0 to 1.0)
+    float progress;
+    if (elapsed >= fadeDurationMs_) {
+        progress = 1.0f;
+    } else {
+        progress = (float)elapsed / (float)fadeDurationMs_;
+    }
+    
+    // Interpolate all channels
+    uint8_t newR = fadeStartR_ + (int16_t)(fadeTargetR_ - fadeStartR_) * progress;
+    uint8_t newG = fadeStartG_ + (int16_t)(fadeTargetG_ - fadeStartG_) * progress;
+    uint8_t newB = fadeStartB_ + (int16_t)(fadeTargetB_ - fadeStartB_) * progress;
+    uint8_t newW = fadeStartW_ + (int16_t)(fadeTargetW_ - fadeStartW_) * progress;
+    uint8_t newBr = fadeStartBrightness_ + (int16_t)(fadeTargetBrightness_ - fadeStartBrightness_) * progress;
+    
+    // Only update if any value changed (avoid redundant writes)
+    bool changed = (newR != currentR_ || newG != currentG_ || newB != currentB_ || 
+                    newW != currentW_ || newBr != currentBrightness_);
+    
+    if (changed) {
+        currentR_ = newR;
+        currentG_ = newG;
+        currentB_ = newB;
+        currentW_ = newW;
+        currentBrightness_ = newBr;
+        
+        strip_->setBrightness(currentBrightness_);
+        update_strip(currentR_, currentG_, currentB_, currentW_);
+        flush_strip();
+    }
+    
+    // Check if fade is complete
+    if (progress >= 1.0f) {
+        fadeInProgress_ = false;
+        Serial.printf("Fade complete: R=%d G=%d B=%d W=%d Br=%d\n",
+                     currentR_, currentG_, currentB_, currentW_, currentBrightness_);
     }
 }
 

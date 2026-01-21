@@ -36,7 +36,7 @@ public:
     
 private:
     RGBWStrip *parent_;
-    int channel_;  // 0=Red, 1=Green, 2=Blue, 3=White, 4=Brightness
+    int channel_;  // 0=Red, 1=Green, 2=Blue, 3=White, 4=Brightness, 5=Duration
 };
 
 /// Main RGBW strip controller
@@ -67,11 +67,15 @@ public:
     
     /// Flush pending strip updates (rate-limited)
     void flush_strip();
+    
+    /// Poll fade interpolation - call from loop() at ~60-100Hz
+    /// Handles local high-fidelity fade animation
+    void poll_fade();
 
     /// Get node pointer
     Node* node() { return node_; }
     
-    /// Get event ID for specific channel (0=R, 1=G, 2=B, 3=W, 4=Brightness)
+    /// Get event ID for specific channel (0-5: R, G, B, W, Brightness, Duration)
     uint64_t event_id(int channel) { return eventIds_[channel]; }
     
     /// Get startup delay in seconds (controller only)
@@ -86,10 +90,26 @@ private:
     Adafruit_NeoPixel *strip_;
     
     bool isController_;
-    uint64_t eventIds_[5];  // Event IDs: [R, G, B, W, Brightness]
+    uint64_t eventIds_[6];  // Event IDs: [R, G, B, W, Brightness, Duration]
     
+    // Current actual values (what LEDs are showing right now)
     uint8_t currentR_, currentG_, currentB_, currentW_;
     uint8_t currentBrightness_;
+    
+    // Pending values (received via LCC, waiting for duration event to trigger fade)
+    uint8_t pendingR_, pendingG_, pendingB_, pendingW_;
+    uint8_t pendingBrightness_;
+    
+    // Fade interpolation state
+    bool fadeInProgress_;
+    unsigned long fadeStartTime_;      // millis() when fade started
+    unsigned long fadeDurationMs_;     // Total fade duration in ms
+    uint8_t fadeStartR_, fadeStartG_, fadeStartB_, fadeStartW_;
+    uint8_t fadeStartBrightness_;
+    uint8_t fadeTargetR_, fadeTargetG_, fadeTargetB_, fadeTargetW_;
+    uint8_t fadeTargetBrightness_;
+    
+    // For controller sending (last sent values)
     uint8_t lastSentR_, lastSentG_, lastSentB_, lastSentW_, lastSentBrightness_;
     
     uint8_t adcChannelIndex_;
@@ -118,7 +138,7 @@ private:
     unsigned long lastSyncStepTime_;   // Time of last sync step
     uint16_t startupDelaySec_;        // Startup delay before fade animation
     
-    RGBWEventHandler *eventHandlers_[5];  // One handler per channel
+    RGBWEventHandler *eventHandlers_[6];  // One handler per channel (R,G,B,W,Br,Dur)
     
     friend class RGBWEventHandler;
 };

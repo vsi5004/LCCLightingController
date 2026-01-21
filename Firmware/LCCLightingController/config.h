@@ -33,16 +33,17 @@ using RGBWGroup = RepeatedGroup<RGBWConfig, NUM_RGBW_STRIPS>;
 
 /// Initial values for RGBW configuration
 constexpr uint64_t RGBW_EVENT_INIT[] = {
-    0x0501010122600000ULL,  // Red base
-    0x0501010122600100ULL,  // Green base
-    0x0501010122600200ULL,  // Blue base
-    0x0501010122600300ULL,  // White base
-    0x0501010122600400ULL   // Brightness base
+    0x050101019F600000ULL,  // Red base
+    0x050101019F600100ULL,  // Green base
+    0x050101019F600200ULL,  // Blue base
+    0x050101019F600300ULL,  // White base
+    0x050101019F600400ULL,  // Brightness base
+    0x050101019F600500ULL   // Duration base (triggers fade)
 };
 
 /// Modify this value every time the EEPROM needs to be cleared on the node
 /// after an update. Increment when config structure changes (fields added/removed).
-static constexpr uint16_t CANONICAL_VERSION = 0x106;
+static constexpr uint16_t CANONICAL_VERSION = 0x107;
 
 /// Defines the main segment in the configuration CDI. This is laid out at
 /// origin 128 to give space for the ACDI user data at the beginning.
